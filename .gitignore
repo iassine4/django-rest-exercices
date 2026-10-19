@@ -1,4 +1,18 @@
-.venv
-.idea
-*.sqlite3
+# Environnements virtuels Python
+.venv/
+venv/
+
+# Fichiers temporaires Python
 __pycache__/
+*.py[cod]
+
+# Bases de données locales
+*.sqlite3
+
+# Éditeurs
+.idea/
+.vscode/
+
+# Variables d'environnement et secrets
+.env
+.env.*
