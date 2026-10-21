@@ -1,20 +1,36 @@
-from rest_framework import status
-from rest_framework.views import APIView
-from rest_framework.response import Response
+from rest_framework.viewsets import ReadOnlyModelViewSet
 
-from shop.models import Category
-from shop.serializers import CategorySerializer
+from shop.models import Category, Product, Article
+from shop.serializers import CategorySerializer, ProductSerializer, ArticleSerializer
 
 
-class CategoryView(APIView):
+class CategoryViewset(ReadOnlyModelViewSet):
 
-    def get(self, *args, **kwargs):
-        queryset = Category.objects.all()
-        serializer = CategorySerializer(queryset, many=True)
-        return Response(serializer.data)
+    serializer_class = CategorySerializer
 
-    def post(self, request, *args, **kwargs):
-        serializer = CategorySerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    def get_queryset(self):
+        return Category.objects.filter(active=True)
+
+
+class ProductViewset(ReadOnlyModelViewSet):
+
+    serializer_class = ProductSerializer
+
+    def get_queryset(self):
+        queryset = Product.objects.filter(active=True)
+        category_id = self.request.GET.get('category_id')
+        if category_id:
+            queryset = queryset.filter(category_id=category_id)
+        return queryset
+
+
+class ArticleViewset(ReadOnlyModelViewSet):
+
+    serializer_class = ArticleSerializer
+
+    def get_queryset(self):
+        queryset = Article.objects.filter(active=True)
+        product_id = self.request.GET.get('product_id')
+        if product_id is not None:
+            queryset = queryset.filter(product_id=product_id)
+        return queryset
