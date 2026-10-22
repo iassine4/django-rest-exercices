@@ -1,10 +1,13 @@
 from decimal import Decimal
+from datetime import timedelta
 from unittest import mock
 
 import requests
+from django.contrib.auth import get_user_model
 
 from django.urls import reverse_lazy, reverse
 from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from shop.models import Category, Product, Article
 
@@ -228,6 +231,13 @@ class TestAdminCategory(ShopAPITestCase):
 
     url = reverse_lazy('admin-category-list')
 
+    def setUp(self):
+        super().setUp()
+        user = get_user_model().objects.create_user(
+            username='admin-category', is_superuser=True, is_staff=True,
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {AccessToken.for_user(user)}')
+
     def test_list_includes_inactive(self):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
@@ -357,6 +367,116 @@ class TestAdminArticle(ShopAPITestCase):
                 self.article.refresh_from_db()
                 self.assertEqual(self.article.price, Decimal('2.50'))
                 self.assertEqual(self.article.product_id, self.product.pk)
+
+
+class TestCategoryPermissions(ShopAPITestCase):
+    """Contrôle les deux droits sur toutes les opérations d'administration."""
+
+    def assert_category_access_denied(self, expected_status):
+        list_url = reverse('admin-category-list')
+        detail_url = reverse('admin-category-detail', kwargs={'pk': self.category.pk})
+        initial_count = Category.objects.count()
+        requests_to_test = [
+            ('get', list_url, {}),
+            ('post', list_url, {'name': 'Boissons', 'description': 'Boissons fraîches'}),
+            ('get', detail_url, {}),
+            ('put', detail_url, {'name': 'Fruits', 'description': 'Fruits frais'}),
+            ('patch', detail_url, {'description': 'Fruits frais'}),
+            ('delete', detail_url, {}),
+        ]
+        for method, url, data in requests_to_test:
+            with self.subTest(method=method, url=url):
+                response = getattr(self.client, method)(url, data)
+                self.assertEqual(response.status_code, expected_status)
+                self.assertEqual(Category.objects.count(), initial_count)
+                self.category.refresh_from_db()
+                self.assertEqual(self.category.description, '')
+                self.assertTrue(self.category.active)
+
+    def test_anonymous_is_denied(self):
+        self.assert_category_access_denied(401)
+
+    def test_authenticated_roles_without_both_rights_are_denied(self):
+        for superuser, staff in [(False, False), (False, True), (True, False)]:
+            with self.subTest(is_superuser=superuser, is_staff=staff):
+                user = get_user_model().objects.create_user(
+                    username=f'role-{superuser}-{staff}',
+                    is_superuser=superuser, is_staff=staff,
+                )
+                self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {AccessToken.for_user(user)}')
+                self.assert_category_access_denied(403)
+
+    def test_superuser_and_staff_can_read_detail(self):
+        user = get_user_model().objects.create_user(
+            username='allowed-admin', is_superuser=True, is_staff=True,
+        )
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {AccessToken.for_user(user)}')
+        response = self.client.get(reverse('admin-category-detail', kwargs={'pk': self.category.pk}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['id'], self.category.pk)
+
+    def test_public_and_article_admin_endpoints_remain_accessible(self):
+        for route in ['category-list', 'product-list', 'article-list', 'admin-article-list']:
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route))
+                self.assertEqual(response.status_code, 200)
+
+
+class TestJWTAuthentication(APITestCase):
+    """Vérifie les jetons et leur utilisation sans modifier les droits d'accès."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            username='test-jwt', password='test-password-jwt',
+        )
+
+    def test_obtain_tokens(self):
+        response = self.client.post(reverse('obtain_tokens'), {
+            'username': 'test-jwt', 'password': 'test-password-jwt',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(AccessToken(response.data['access'])['user_id'], self.user.pk)
+        self.assertEqual(RefreshToken(response.data['refresh'])['user_id'], self.user.pk)
+
+    def test_invalid_credentials(self):
+        response = self.client.post(reverse('obtain_tokens'), {
+            'username': 'test-jwt', 'password': 'incorrect',
+        })
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn('access', response.data)
+
+    def test_refresh_token(self):
+        token = RefreshToken.for_user(self.user)
+        response = self.client.post(reverse('refresh_token'), {'refresh': str(token)})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(AccessToken(response.data['access'])['user_id'], self.user.pk)
+
+    def test_invalid_refresh_token(self):
+        response = self.client.post(reverse('refresh_token'), {'refresh': 'invalid'})
+        self.assertEqual(response.status_code, 401)
+
+    def test_bearer_authenticates_user(self):
+        token = AccessToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        response = self.client.get(reverse('article-list'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.wsgi_request.user.pk, self.user.pk)
+
+    def test_invalid_or_expired_access_token(self):
+        expired = AccessToken.for_user(self.user)
+        expired.set_exp(lifetime=timedelta(seconds=-1))
+        for token in ['invalid', str(expired)]:
+            with self.subTest(token_type='invalid' if token == 'invalid' else 'expired'):
+                self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+                response = self.client.get(reverse('article-list'))
+                self.assertEqual(response.status_code, 401)
+
+    def test_session_authentication_is_preserved(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse('article-list'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.wsgi_request.user.pk, self.user.pk)
 
 
 class TestProductEcoscore(APITestCase):
